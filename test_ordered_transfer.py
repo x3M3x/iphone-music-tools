@@ -92,6 +92,22 @@ class OrderedTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(peak,2)
         self.assertEqual(result,['a','b','c','d'])
 
+    async def test_very_large_files_are_isolated_into_their_own_batches(self):
+        from music_importer import Song as SongRecord
+        from ordered_transfer import LARGE_FILE_BYTES
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            small=Path(tmp)/'small.mp3';small.write_bytes(b'a')
+            other=Path(tmp)/'other.mp3';other.write_bytes(b'c')
+            large=Path(tmp)/'large.mp3';large.write_bytes(b'b')
+            def song(path,size,date): return SongRecord(path,path.stem,'','',size,1,None,date)
+            songs=[song(large,LARGE_FILE_BYTES+1,9),song(other,6,10),song(small,5,11)]
+            with patch('ordered_transfer.content_hash',side_effect=lambda s:s.path.stem):
+                await run(self.phone,'phone-1',songs,[],self.journal,lambda *x:None,self.stop,batch_size=10)
+        # The large song is sent alone; the two small ones share one batch.
+        self.assertEqual(self.phone.prepare_calls,2)
+        self.assertEqual([call[1] for call in self.phone.calls if call[0]=='upload'],['large','other','small'])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

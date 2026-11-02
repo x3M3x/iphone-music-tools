@@ -15,6 +15,7 @@ from pathlib import Path
 from music_importer import ImportErrorSafe, content_hash, newest_first
 
 CHECK_WORKERS = 4
+LARGE_FILE_BYTES = 256 * 1024 * 1024
 
 
 async def ordered_hashes(songs, stop, workers=CHECK_WORKERS):
@@ -274,10 +275,17 @@ async def _run_locked(adapter, device, ordered, playlists, journal_path, progres
                     known.append(record[1])
             if not set(current).issubset(known) or [v for v in known if v in set(current)] != current:
                 raise ImportErrorSafe('An existing playlist contains unrelated songs or has a different order; review it before importing.')
-        for start in range(0, len(pending), batch_size):
+        start = 0
+        while start < len(pending):
             if stop.is_set():
                 break
             chunk = pending[start:start + batch_size]
+            # shortcut: phones drop long transfers of very large files; a drop
+            # must leave only that one song pending, never a whole batch.
+            large = next((offset for offset,(_, song, _) in enumerate(chunk)
+                          if song.size > LARGE_FILE_BYTES), None)
+            if large is not None:
+                chunk = chunk[:large] if large else chunk[:1]
             progress('preparing_batch',start,len(pending),f'Preparing batch of {len(chunk)} songs')
             plans = await adapter.prepare_batch(device, [(song, sha) for _, song, sha in chunk])
             if len(plans) != len(chunk) or any(not isinstance(plan, dict) for plan in plans):
@@ -317,6 +325,7 @@ async def _run_locked(adapter, device, ordered, playlists, journal_path, progres
                 identities[song.path] = str(track_id)
             for (index, song, _sha) in chunk:
                 progress('verified', index, len(ordered), song.path.name)
+            start += len(chunk)
         if stop.is_set():
             return {'stopped': True, 'uploaded_or_verified': len(identities)}
         for index, song, sha in duplicates:
