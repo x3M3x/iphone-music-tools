@@ -5,6 +5,9 @@ __pycache__/
 *.db
 *.lock
 *.log
+*.jsonl
+*_report*.json
+*.m3u8
 import_reports/
 MusicExport*/
 *.mp3
