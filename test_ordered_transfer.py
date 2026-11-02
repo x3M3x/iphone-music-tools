@@ -77,6 +77,21 @@ class FakePhone:
 
 
 class OrderedTransferTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hash_worker_limit_is_configurable_and_order_is_preserved(self):
+        import time
+        from ordered_transfer import ordered_hashes
+        active=0;peak=0;guard=threading.Lock()
+        def work(song):
+            nonlocal active,peak
+            with guard: active+=1;peak=max(peak,active)
+            time.sleep(.03)
+            with guard: active-=1
+            return song
+        with patch('ordered_transfer.content_hash',side_effect=work):
+            result=[x async for x in ordered_hashes(['a','b','c','d'],threading.Event(),workers=2)]
+        self.assertEqual(peak,2)
+        self.assertEqual(result,['a','b','c','d'])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

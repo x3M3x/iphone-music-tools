@@ -6,6 +6,7 @@ import json
 import queue
 import sqlite3
 import threading
+import time
 import traceback
 from contextlib import closing
 from datetime import datetime
@@ -46,6 +47,16 @@ def batch_size_argument(value):
     return size
 
 
+def worker_argument(value, maximum=16):
+    try:
+        count = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f'workers must be a whole number from 1 to {maximum}') from exc
+    if not 1 <= count <= maximum:
+        raise argparse.ArgumentTypeError(f'workers must be from 1 to {maximum}')
+    return count
+
+
 def validate_confirmed_plan(context, songs, bindings):
     """Refuse folder or file changes after the confirmation preview."""
     root=context['root']
@@ -69,10 +80,10 @@ def validate_confirmed_plan(context, songs, bindings):
 
 
 class ImportWindow:
-    def __init__(self, root, batch_size=10):
+    def __init__(self, root, batch_size=10, format_workers=8, hash_workers=4, metadata_workers=4, readback_workers=4):
         self.root = root
         root.title('iPhone Music Import')
-        root.minsize(790, 650)
+        root.minsize(790, 710)
         root.protocol('WM_DELETE_WINDOW', self.close)
         self.messages = queue.Queue()
         self.devices = {}
@@ -96,6 +107,12 @@ class ImportWindow:
         self.skip_possible = tk.BooleanVar(value=True)
         self.batch_mode = tk.BooleanVar(value=True)
         self.batch_size = tk.StringVar(value=str(batch_size))
+        self.format_workers = tk.StringVar(value=str(format_workers))
+        self.hash_workers = tk.StringVar(value=str(hash_workers))
+        self.metadata_workers = tk.StringVar(value=str(metadata_workers))
+        self.readback_workers = tk.StringVar(value=str(readback_workers))
+        self.phase_started = None
+        self.phase_key = None
         self.map_note = tk.StringVar(value='Playlist folders will match automatically by name.')
         self.note = tk.StringVar(value='Choose the export folder and a collection.')
         self.status = tk.StringVar(value='Connect your new iPhone, then select Check iPhone.')
@@ -147,6 +164,16 @@ class ImportWindow:
         self.batch_size_control=ttk.Spinbox(options,from_=1,to=100,textvariable=self.batch_size,width=5)
         self.batch_size_control.grid(row=0,column=3,sticky='w')
         ttk.Label(options,textvariable=self.map_note,foreground='#555555').grid(row=2,column=0,columnspan=2,sticky='w')
+        performance=ttk.Frame(options); performance.grid(row=3,column=0,columnspan=4,sticky='w',pady=(6,0))
+        self.worker_controls=[]
+        for label, variable, maximum in (('Format checks',self.format_workers,16),
+                                         ('File hashes',self.hash_workers,16),
+                                         ('Metadata',self.metadata_workers,16),
+                                         ('Phone reads',self.readback_workers,8)):
+            ttk.Label(performance,text=label).pack(side='left',padx=(0,3))
+            control=ttk.Spinbox(performance,from_=1,to=maximum,textvariable=variable,width=3)
+            control.pack(side='left',padx=(0,12)); self.worker_controls.append(control)
+        ttk.Label(options,text='Workers per stage; uploads are sent in order.',foreground='#555555').grid(row=4,column=0,columnspan=4,sticky='w')
         ttk.Label(pane, textvariable=self.note, wraplength=750).grid(row=6, column=0, columnspan=4, sticky='w', pady=(6,5))
 
         table_frame = ttk.Frame(pane)
@@ -295,7 +322,7 @@ class ImportWindow:
 
     def set_running(self, running):
         self.importing=running
-        for control in (self.browse_button,self.check_button,self.batch_size_control):
+        for control in (self.browse_button,self.check_button,self.batch_size_control,*self.worker_controls):
             control.config(state='disabled' if running else 'normal')
         self.source_entry.config(state='disabled' if running else 'readonly')
         for control in (self.source_combo,self.order_combo,self.device_combo,self.dest_combo):
@@ -310,8 +337,12 @@ class ImportWindow:
         if self.importing:return
         try:
             requested_batch=batch_size_argument(self.batch_size.get())
+            format_workers=worker_argument(self.format_workers.get())
+            hash_workers=worker_argument(self.hash_workers.get())
+            metadata_workers=worker_argument(self.metadata_workers.get())
+            readback_workers=worker_argument(self.readback_workers.get(),8)
         except argparse.ArgumentTypeError as exc:
-            messagebox.showerror('Invalid batch size',str(exc));return
+            messagebox.showerror('Invalid performance settings',str(exc));return
         device=self.devices.get(self.device.get())
         dest=self.destinations.get(self.destination.get())
         creating=False
@@ -330,8 +361,11 @@ class ImportWindow:
         target_id=None if creating else dest['id']
         source_root=Path(self.source_root.get()).expanduser().resolve()
         context={'device':device,'dest':dest,'name':name,'target_id':target_id,'batch':batch,
-                 'source':source,'root':source_root,'batch_size':requested_batch}
+                 'source':source,'root':source_root,'batch_size':requested_batch,
+                 'format_workers':format_workers,'hash_workers':hash_workers,
+                 'metadata_workers':metadata_workers,'readback_workers':readback_workers}
         self.stop_event.clear();self.set_running(True)
+        self.phase_key=None;self.phase_started=None
         self.bar.config(maximum=1,value=0)
         self.counts.set('Refreshing the files and dates…')
         self.status.set('Checking for songs added to the folders since the preview…')
@@ -346,7 +380,8 @@ class ImportWindow:
                 if not batch and dest and dest['kind']==2:
                     bindings=[backend.PlaylistBinding(source.name,dest['id'],None,songs)]
                 errors=direct_preflight.scan(songs,self.stop_event,
-                    lambda done,total,issues:self.messages.put(('preflight_progress',(done,total,issues))))
+                    lambda done,total,issues:self.messages.put(('preflight_progress',(done,total,issues))),
+                    workers=format_workers)
                 if not self.stop_event.is_set() and not errors:
                     self.messages.put(('preflight_stage','Checking artist and album groups on the phone…'))
                     data,wal=asyncio.run(direct_phone.read_snapshot(device['id']))
@@ -433,10 +468,12 @@ class ImportWindow:
                             if self.stop_event.is_set():
                                 return {'stopped':True,'uploaded_or_verified':0}
                             async with locked_phone(device['id']) as (client,afc):
-                                adapter=DirectAdapter(device['id'],client,afc)
+                                adapter=DirectAdapter(device['id'],client,afc,
+                                    metadata_workers=context['metadata_workers'],readback_workers=context['readback_workers'])
                                 return await ordered_transfer.run(adapter,device['id'],songs,playlists,
                                                                   JOURNAL,progress,self.stop_event,
-                                                                  batch_size=context['batch_size'],automatic_playlists=automatic)
+                                                                  batch_size=context['batch_size'],automatic_playlists=automatic,
+                                                                  hash_workers=context['hash_workers'])
                         result=asyncio.run(transfer())
                         log.write(json.dumps({'result':result,'stopped':self.stop_event.is_set()},ensure_ascii=False)+'\n')
                         self.messages.put(('direct_done',result))
@@ -475,7 +512,12 @@ class ImportWindow:
             elif kind=='preflight_progress':
                 done,total,issues=value
                 self.bar.config(maximum=max(total,1),value=done)
-                self.counts.set(f'Checking local files: {done:,} of {total:,} · {issues:,} need review')
+                now=time.monotonic()
+                if self.phase_key != 'preflight':
+                    self.phase_key='preflight';self.phase_started=now;self.phase_initial=done
+                elapsed=now-self.phase_started
+                speed=f' · {(done-self.phase_initial)/elapsed:.1f} files/s' if elapsed>=2 and done>self.phase_initial else ''
+                self.counts.set(f'Checking formats ({self.format_workers.get()} workers): {done:,} of {total:,} · {issues:,} need review{speed}')
             elif kind=='preflight_stage':
                 self.status.set(value)
             elif kind=='preflight_error':
@@ -518,12 +560,19 @@ class ImportWindow:
                 if generation==self.device_generation:self.status.set(error)
             elif kind=='direct_progress':
                 phase=value['phase'];done=value['index'];total=value['total']
-                self.bar.config(maximum=max(total,1),value=done if phase in ('checking_local','checking_phone','verified','playlist') else max(done-1,0))
-                labels={'checking_local':'Checking local files (4 workers)',
-                        'checking_phone':'Verifying songs already on iPhone',
+                self.bar.config(maximum=max(total,1),value=done if phase in ('checking_local','checking_metadata','checking_phone','preparing_batch','verified','playlist') else max(done-1,0))
+                labels={'checking_local':f'Hashing local files ({self.hash_workers.get()} workers)',
+                        'checking_metadata':f'Preparing metadata ({self.metadata_workers.get()} workers)',
+                        'checking_phone':f'Verifying phone files ({self.readback_workers.get()} workers)',
+                        'preparing_batch':f'Preparing batches ({self.metadata_workers.get()} metadata workers)',
                         'uploading':'Uploading','verified':'Verified','playlist':'Linking playlist'}
                 label=labels.get(phase,phase.capitalize())
-                self.counts.set(f'{label}: {done:,} of {total:,}')
+                now=time.monotonic()
+                if phase != self.phase_key:
+                    self.phase_key=phase; self.phase_started=now; self.phase_initial=done
+                elapsed=now-self.phase_started
+                speed=f' · {(done-self.phase_initial)/elapsed:.1f} files/s' if elapsed>=2 and done>self.phase_initial and phase in ('checking_local','checking_metadata','checking_phone') else ''
+                self.counts.set(f'{label}: {done:,} of {total:,}{speed}')
                 self.status.set(f'{label}: {value["file"]}')
             elif kind=='direct_done':
                 self.set_running(False);self.report_button.config(state='normal')
@@ -578,8 +627,12 @@ def main():
     parser=argparse.ArgumentParser(description='Import iPhone music in verified batches.')
     parser.add_argument('--batch-size',type=batch_size_argument,default=10,
                         help='maximum songs per sync batch (1–100; default 10)')
+    parser.add_argument('--format-workers',type=worker_argument,default=8,help='local format-check workers (1–16)')
+    parser.add_argument('--hash-workers',type=worker_argument,default=4,help='local file-hashing workers (1–16)')
+    parser.add_argument('--metadata-workers',type=worker_argument,default=4,help='metadata preparation workers (1–16)')
+    parser.add_argument('--readback-workers',type=lambda value:worker_argument(value,8),default=4,help='phone readback workers (1–8)')
     args=parser.parse_args()
-    root=tk.Tk(); ImportWindow(root,args.batch_size); root.mainloop()
+    root=tk.Tk(); ImportWindow(root,args.batch_size,args.format_workers,args.hash_workers,args.metadata_workers,args.readback_workers); root.mainloop()
 
 
 if __name__=='__main__':main()

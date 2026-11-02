@@ -89,8 +89,8 @@ class RemoteReadbackTests(unittest.IsolatedAsyncioTestCase):
         with patch('direct_verify.stable_capture',new=AsyncMock(return_value=(b'db',None))), \
              patch('direct_verify.parse_tracks',return_value=[object()]*5), \
              patch('direct_verify._check_and_hash',side_effect=read):
-            result=await verify_inserts(object(),items,lambda n,total,name: progress.append((n,name)),threading.Event())
-        self.assertGreater(peak,1)
+            result=await verify_inserts(object(),items,lambda n,total,name: progress.append((n,name)),threading.Event(),workers=2)
+        self.assertEqual(peak,2)
         self.assertEqual(progress,[(i,str(i)) for i in range(1,6)])
         self.assertEqual(len(result),5)
 

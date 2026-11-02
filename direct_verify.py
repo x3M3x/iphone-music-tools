@@ -121,15 +121,17 @@ async def _hash_remote(afc, path, expected_size):
     return digest.hexdigest()
 
 
-async def verify_inserts(afc, items, progress=None, stop=None):
+async def verify_inserts(afc, items, progress=None, stop=None, workers=4):
     """Verify many tracks against one database snapshot and exact file bytes."""
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 8:
+        raise PhoneReadError('Choose 1 to 8 phone readback workers.')
     db, wal = await stable_capture(afc)
     tracks = parse_tracks(db, wal, [(item[0],item[4]) for item in items])
     results = {}
-    for start in range(0, len(items), 4):
+    for start in range(0, len(items), workers):
         if stop is not None and stop.is_set():
             raise PhoneReadError('Stopped while checking songs already on the phone.')
-        group = list(zip(items[start:start+4], tracks[start:start+4]))
+        group = list(zip(items[start:start+workers], tracks[start:start+workers]))
         # Independent handles share AFC's packet demultiplexer; all reads
         # finish or are cancelled before leaving this group.
         pending = [asyncio.create_task(_check_and_hash(afc, track, source, path, sha))

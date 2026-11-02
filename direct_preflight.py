@@ -1,5 +1,5 @@
 """Check selected files locally before asking to import anything."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -12,7 +12,9 @@ from music_importer import newest_first
 from track_operation_preview import insert_preview
 
 
-def scan(songs, stop, progress):
+def scan(songs, stop, progress, workers=8):
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 16:
+        raise ImportErrorSafe('Choose 1 to 16 format-check workers.')
     def check(song):
         try:
             if file_date_ns(song.path) != song.file_date_ns:
@@ -28,18 +30,17 @@ def scan(songs, stop, progress):
             return {'file':str(song.path), 'error':str(exc)}
 
     failures=[]
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(check,song) for song in songs]
-        for i,future in enumerate(futures,1):
+        for i,future in enumerate(as_completed(futures),1):
             if stop.is_set():
-                for remaining in futures[i-1:]:
+                for remaining in futures:
                     remaining.cancel()
                 raise ImportErrorSafe('Stopped during local file checks.')
             error=future.result()
             if error:
                 failures.append(error)
-            if i % 50 == 0 or i == len(songs):
-                progress(i,len(songs),len(failures))
+            progress(i,len(songs),len(failures))
     return failures
 
 

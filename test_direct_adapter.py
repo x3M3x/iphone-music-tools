@@ -71,7 +71,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             with patch('direct_adapter.file_date_ns',return_value=9), \
                  patch('direct_adapter.inspect',side_effect=inspect_file), \
                  patch('direct_adapter.verify_inserts',verify):
-                await adapter.verify_existing('new-phone',entries,lambda *args:None,threading.Event())
+                await adapter.verify_existing('new-phone',entries,lambda *args,**kwargs:None,threading.Event())
             self.assertGreater(peak,1)
             verify.assert_awaited_once()
             self.assertEqual(len(verify.await_args.args[1]),4)

@@ -1,4 +1,6 @@
 import unittest
+import threading
+import time
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -10,6 +12,23 @@ from music_importer import ImportErrorSafe
 
 
 class PreflightTests(unittest.TestCase):
+    def test_worker_count_and_progress_follow_completed_checks(self):
+        songs=[SimpleNamespace(path=Path(str(i)),file_date_ns=5) for i in range(4)]
+        active=0; peak=0; lock=threading.Lock(); progress=[]
+        def inspect(path):
+            nonlocal active,peak
+            with lock: active+=1; peak=max(peak,active)
+            time.sleep(.03)
+            with lock: active-=1
+            return SimpleNamespace(cover=None)
+        with patch('direct_preflight.file_date_ns',return_value=5), \
+             patch.object(Path,'stat',return_value=SimpleNamespace(st_size=1024)), \
+             patch('direct_preflight.inspect',side_effect=inspect), \
+             patch('direct_preflight.insert_preview'):
+            direct_preflight.scan(songs,Event(),lambda *x:progress.append(x),workers=2)
+        self.assertEqual(peak,2)
+        self.assertEqual([row[0] for row in progress],[1,2,3,4])
+
     def test_checks_all_files_before_any_import_and_reports_errors(self):
         songs=[SimpleNamespace(path=Path('a'),file_date_ns=5),
                SimpleNamespace(path=Path('b'),file_date_ns=5)]

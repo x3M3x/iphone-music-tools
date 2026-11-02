@@ -31,7 +31,9 @@ The importer keeps `direct_import_history.sqlite` locally to recognize and verif
 
 ## Performance and limitations
 
-Local metadata and hashes are checked concurrently. Uploads are sent in date order in batches; the tool verifies transferred audio and artwork by reading them back. The experimental verifier can overlap up to four independent phone reads; this has offline tests but has not yet been benchmarked on real devices. Batch sizes from 1 to 100 are selectable; a larger batch reduces session overhead but makes interruption recovery more involved. No specific transfer rate is guaranteed.
+The window lets you set **Format checks**, **File hashes**, and **Metadata** workers (1–16), **Phone reads** (1–8), and **Songs per batch** (1–100). Progress shows the active stage, worker count, and an approximate files-per-second rate for checks. Larger worker counts can be slower on a busy disk or phone, so compare rates with the same library. Phone reads use bounded parallel readback; their performance and stability vary by device and have not yet been benchmarked on real phones.
+
+Uploads are sent in date order in batches; transferred audio and artwork are verified by reading them back. Larger batches reduce session overhead but make interruption recovery more involved. Settings apply when a run starts and cannot be changed during it. No specific transfer rate is guaranteed. Command-line defaults can also be set with `--format-workers`, `--hash-workers`, `--metadata-workers`, `--readback-workers`, and `--batch-size` when launching the importer.
 
 The original user library and device database, journals, reports, personal songs, and pairing records are not part of this repository. Export and import reports can contain file names and other personal information; review them before sharing.
 

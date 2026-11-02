@@ -25,10 +25,15 @@ ARTWORK_DB = '/iTunes_Control/Artwork/ArtworkDB'
 
 
 class DirectAdapter:
-    def __init__(self, serial, client, afc):
+    def __init__(self, serial, client, afc, metadata_workers=4, readback_workers=4):
         if not serial:
             raise PhoneReadError('Choose the destination phone.')
         self.serial, self.client, self.afc = serial, client, afc
+        if isinstance(metadata_workers, bool) or not isinstance(metadata_workers, int) or not 1 <= metadata_workers <= 16:
+            raise PhoneReadError('Choose 1 to 16 metadata workers.')
+        if isinstance(readback_workers, bool) or not isinstance(readback_workers, int) or not 1 <= readback_workers <= 8:
+            raise PhoneReadError('Choose 1 to 8 phone readback workers.')
+        self.metadata_workers, self.readback_workers = metadata_workers, readback_workers
         self.expected_identity = None
         self.current_batch = None
         self.verified_ids = set()
@@ -93,11 +98,11 @@ class DirectAdapter:
         chosen = set(inventory.used_paths)
         plans = []
         loop = asyncio.get_running_loop()
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix='batch-metadata') as pool:
+        with ThreadPoolExecutor(max_workers=self.metadata_workers, thread_name_prefix='batch-metadata') as pool:
             inspected = []
-            for start in range(0, len(songs_with_shas), 4):
+            for start in range(0, len(songs_with_shas), self.metadata_workers):
                 inspected.extend(await asyncio.gather(*(loop.run_in_executor(pool,self._inspect,song)
-                    for song,_ in songs_with_shas[start:start+4])))
+                    for song,_ in songs_with_shas[start:start+self.metadata_workers])))
         for (song, sha), raw in zip(songs_with_shas, inspected):
             track, album, artist, source, overrides = state.allocate(raw)
             artwork = None
@@ -188,7 +193,7 @@ class DirectAdapter:
             plan, song, sha = entry['plan'], entry['song'], entry['sha']
             source = apply_spelling(self._inspect(song), plan.get('spelling_overrides', {}))
             items.append((int(track_id), source, plan['path'], sha, plan['artwork_id']))
-        await verify_inserts(self.afc, items)
+        await verify_inserts(self.afc, items, workers=self.readback_workers)
         self.verified_ids.update(str(track_id) for track_id in track_ids)
         return list(track_ids)
 
@@ -209,7 +214,7 @@ class DirectAdapter:
         """Inspect local files concurrently; use one phone snapshot for readback."""
         self._device(serial)
         loop=asyncio.get_running_loop()
-        pool=ThreadPoolExecutor(max_workers=4, thread_name_prefix='music-metadata')
+        pool=ThreadPoolExecutor(max_workers=self.metadata_workers, thread_name_prefix='music-metadata')
         try:
             def prepare(entry):
                 song,track_id,sha,plan=entry
@@ -221,12 +226,13 @@ class DirectAdapter:
                 return (int(track_id),source,plan['path'],sha,plan['artwork_id'])
             # Limit queued work to a small window, and preserve input order.
             items=[]
-            for start in range(0,len(entries),4):
+            for start in range(0,len(entries),self.metadata_workers):
                 if stop.is_set():
                     raise PhoneReadError('Stopped while checking songs already on the phone.')
                 items.extend(await asyncio.gather(*(loop.run_in_executor(pool,prepare,entry)
-                                                    for entry in entries[start:start+4])))
-            await verify_inserts(self.afc,items,progress=progress,stop=stop)
+                                                    for entry in entries[start:start+self.metadata_workers])))
+                progress(len(items),len(entries),entries[len(items)-1][0].path.name,phase='checking_metadata')
+            await verify_inserts(self.afc,items,progress=progress,stop=stop,workers=self.readback_workers)
             self.verified_ids.update(str(item[0]) for item in items)
         finally:
             await asyncio.to_thread(pool.shutdown,wait=True,cancel_futures=True)

@@ -17,10 +17,12 @@ from music_importer import ImportErrorSafe, content_hash, newest_first
 CHECK_WORKERS = 4
 
 
-async def ordered_hashes(songs, stop):
+async def ordered_hashes(songs, stop, workers=CHECK_WORKERS):
     """Hash a bounded number of local files concurrently, yielding in order."""
     loop = asyncio.get_running_loop()
-    pool = ThreadPoolExecutor(max_workers=CHECK_WORKERS, thread_name_prefix='music-hash')
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 16:
+        raise ImportErrorSafe('Choose 1 to 16 hash workers.')
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='music-hash')
     pending = deque()
     iterator = iter(songs)
 
@@ -32,7 +34,7 @@ async def ordered_hashes(songs, stop):
         return True
 
     try:
-        for _ in range(CHECK_WORKERS):
+        for _ in range(workers):
             if stop.is_set() or not submit_one():
                 break
         while pending and not stop.is_set():
@@ -157,7 +159,7 @@ class Journal:
 
 
 async def run(adapter, device, songs, playlists, journal_path, progress, stop, batch_size=1,
-              automatic_playlists=()):
+              automatic_playlists=(), hash_workers=CHECK_WORKERS):
     """Upload in saved-date order, then link playlist members in newest order.
 
     Playlists are (destination ID, source songs). The adapter must reject
@@ -183,13 +185,13 @@ async def run(adapter, device, songs, playlists, journal_path, progress, stop, b
     lock.__enter__()
     try:
         return await _run_locked(adapter, device, ordered, playlists, journal_path, progress, stop,
-                                 destination_ids, batch_size, automatic_playlists)
+                                 destination_ids, batch_size, automatic_playlists, hash_workers)
     finally:
         lock.__exit__(None, None, None)
 
 
 async def _run_locked(adapter, device, ordered, playlists, journal_path, progress, stop,
-                      destination_ids, batch_size, automatic_playlists):
+                      destination_ids, batch_size, automatic_playlists, hash_workers):
     journal = Journal(Path(journal_path))
     identities = {}
     try:
@@ -228,7 +230,7 @@ async def _run_locked(adapter, device, ordered, playlists, journal_path, progres
         seen_shas = set()
         hashes = {}
         index = 0
-        async for sha in ordered_hashes(ordered, stop):
+        async for sha in ordered_hashes(ordered, stop, hash_workers):
             song = ordered[index]
             index += 1
             progress('checking_local', index, len(ordered), song.path.name)
@@ -250,8 +252,9 @@ async def _run_locked(adapter, device, ordered, playlists, journal_path, progres
             return {'stopped': True, 'uploaded_or_verified': len(identities)}
         if existing_checks:
             try:
+                progress('checking_metadata',0,len(existing_checks),'Preparing local metadata')
                 await adapter.verify_existing(device,existing_checks,
-                    lambda done,total,name:progress('checking_phone',done,total,name),stop)
+                    lambda done,total,name,phase='checking_phone':progress(phase,done,total,name),stop)
             except Exception:
                 if stop.is_set():
                     return {'stopped': True, 'uploaded_or_verified': 0}
@@ -275,10 +278,11 @@ async def _run_locked(adapter, device, ordered, playlists, journal_path, progres
             if stop.is_set():
                 break
             chunk = pending[start:start + batch_size]
+            progress('preparing_batch',start,len(pending),f'Preparing batch of {len(chunk)} songs')
             plans = await adapter.prepare_batch(device, [(song, sha) for _, song, sha in chunk])
             if len(plans) != len(chunk) or any(not isinstance(plan, dict) for plan in plans):
                 raise ImportErrorSafe('Could not prepare a recoverable song operation.')
-            checks = ordered_hashes((song for _, song, _ in chunk), stop)
+            checks = ordered_hashes((song for _, song, _ in chunk), stop, hash_workers)
             checked = 0
             async for digest in checks:
                 _, song, sha = chunk[checked]

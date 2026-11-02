@@ -22,8 +22,10 @@ class ImportUITests(unittest.TestCase):
         window.set_running(True)
         self.assertEqual(str(window.start_button['state']),'disabled')
         self.assertEqual(str(window.stop_button['state']),'normal')
+        self.assertTrue(all(str(control['state'])=='disabled' for control in window.worker_controls))
         window.set_running(False)
         self.assertEqual(str(window.start_button['state']),'disabled')
+        self.assertTrue(all(str(control['state'])=='normal' for control in window.worker_controls))
 
     def test_start_requires_phone_destination_and_songs_without_mapping(self):
         root=tk.Tk();root.withdraw();self.addCleanup(root.destroy)
@@ -67,6 +69,15 @@ class ImportUITests(unittest.TestCase):
         for value in ('0','101','abc'):
             with self.assertRaises(argparse.ArgumentTypeError):
                 batch_size_argument(value)
+
+    def test_worker_settings_reject_out_of_range_values(self):
+        import argparse
+        from music_import_ui import worker_argument
+        self.assertEqual(worker_argument('16'),16)
+        self.assertEqual(worker_argument('8',8),8)
+        for value,maximum in (('0',16),('17',16),('9',8),('x',16)):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                worker_argument(value,maximum)
 
     def test_confirmed_plan_detects_a_new_playlist_folder(self):
         import tempfile
