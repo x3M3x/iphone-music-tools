@@ -15,6 +15,8 @@ py -m venv .venv
 
 Launch **Open Music Exporter.cmd** or **Open Music Importer.cmd**. Select the intended phone carefully. The exporter reads the phone; the importer writes to the selected phone. Do not disconnect during a transfer.
 
+The importer and exporter are currently separate Windows apps. Their windows show progress; see [Troubleshooting](TROUBLESHOOTING.md) if a transfer stops. [Development notes](AGENTS.md) describe how to maintain and test the project.
+
 ## Export
 
 Choose the source iPhone, a new output folder and **Start export**. The exporter reads available local files, metadata and phone artwork; it does not download artwork from the internet. Results are organized as `Playlists/<playlist name>/` and `All the rest/`, with M3U8 playlist files and an export report. Tracks without an accessible supported local file, and protected or subscription tracks, may be skipped. Artwork unavailable on the phone cannot be reconstructed.
