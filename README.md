@@ -33,6 +33,8 @@ The importer keeps `direct_import_history.sqlite` locally to recognize and verif
 
 Phones sometimes drop long-lived connections on their own. Phone reads use a separate data connection that reconnects automatically when dropped, and each upload batch starts on a fresh connection. A drop during an upload still stops the import and the interrupted batch must be reconciled before retrying.
 
+During uploads, the importer reports transfer progress and responds to phone sync pings. This prevents an idle sync session from timing out during long transfers on the tested device.
+
 The optional **Fast check for previously verified songs** checks the phone catalog, metadata, and file and artwork sizes without reading phone-file contents. It can miss audio or artwork changes that retain the same size. Local source files are still hashed, and newly uploaded songs still receive full byte-for-byte readback. The option is off by default.
 
 ## Performance and limitations

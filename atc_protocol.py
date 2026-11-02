@@ -225,15 +225,19 @@ def validate_batch_manifest(message, own_parts, allowed_foreign=()):
     return foreign
 
 
-async def receive_event(service):
+async def receive_event(service, timeout=30, send_lock=None):
     """Read one post-metadata event, answering a phone ping when needed."""
     for _ in range(1024):
-        message = await asyncio.wait_for(receive_frame(service), 30)
+        message = await receive_frame(service) if timeout is None else await asyncio.wait_for(receive_frame(service), timeout)
         if message.get('Session') != 2:
             raise ProtocolError('Unexpected device session; stop and inspect the phone.')
         command = message['Command']
         if command == 'Ping':
-            await send_frame(service, {'Session': 2, 'Command': 'Pong'})
+            if send_lock is None:
+                await send_frame(service, {'Session': 2, 'Command': 'Pong'})
+            else:
+                async with send_lock:
+                    await send_frame(service, {'Session': 2, 'Command': 'Pong'})
             continue
         if command in ('Progress', 'SyncAllowed', 'InstalledAssets', 'AssetMetrics'):
             if not isinstance(message.get('Params'), dict):
@@ -250,6 +254,13 @@ def file_complete(asset_id, path):
         raise ProtocolError('Invalid completed audio asset.')
     return {'Session':2, 'Command':'FileComplete',
             'Params':{'AssetID':asset_id, 'Dataclass':'Media', 'AssetPath':path}}
+
+
+def file_progress(asset_progress, overall_progress):
+    if not (0 <= asset_progress <= 1 and 0 <= overall_progress <= 1):
+        raise ProtocolError('Invalid upload progress.')
+    return {'Session':2, 'Command':'FileProgress',
+            'Params':{'AssetProgress':float(asset_progress), 'OverallProgress':float(overall_progress)}}
 
 
 def file_unavailable(asset_id):

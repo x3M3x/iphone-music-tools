@@ -38,7 +38,7 @@ async def _put_new(afc, path, data):
     await _put_stream(afc, path, io.BytesIO(data), len(data), hashlib.sha256(data).hexdigest())
 
 
-async def _put_stream(afc, path, stream, size, expected_sha, readback=True):
+async def _put_stream(afc, path, stream, size, expected_sha, readback=True, on_progress=None):
     """Write and read back one file in bounded chunks under the caller's lock."""
     if not 0 < size <= MAX_AUDIO:
         raise StagingError('Invalid staged file size.')
@@ -54,6 +54,8 @@ async def _put_stream(afc, path, stream, size, expected_sha, readback=True):
             digest.update(block)
             await afc.fwrite(handle, block)
             written += len(block)
+            if on_progress is not None:
+                await on_progress(written, size)
         if stream.read(1) or digest.hexdigest() != expected_sha:
             raise StagingError('The source changed during upload; inspect before retrying.')
     finally:
@@ -170,7 +172,7 @@ async def stage_playlist_create(afc, operation, reply, *, database_id, library_i
     await _put_new(afc, SIGNATURE, signature)
 
 
-async def stage_audio(afc, *, asset_id, extension, stream, size, expected_sha, permanent_path, cover=None):
+async def stage_audio(afc, *, asset_id, extension, stream, size, expected_sha, permanent_path, cover=None, on_progress=None):
     """Stage one requested asset; caller must already own an exclusive sync lock."""
     await check_audio_paths(afc, asset_id=asset_id, extension=extension,
                             permanent_path=permanent_path, has_cover=cover is not None)
@@ -180,7 +182,7 @@ async def stage_audio(afc, *, asset_id, extension, stream, size, expected_sha, p
         await _put_new(afc, artwork_path, cover)
     # The staged copy is size-checked; the phone's permanent file is hashed
     # byte for byte by verify_insert after the session completes.
-    await _put_stream(afc, audio_base + extension, stream, size, expected_sha, readback=False)
+    await _put_stream(afc, audio_base + extension, stream, size, expected_sha, readback=False, on_progress=on_progress)
     await _absent(afc, audio_base)
     await afc.rename(audio_base + extension, audio_base)
 

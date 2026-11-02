@@ -1,9 +1,11 @@
 """One AirTraffic session carrying many prepared song inserts."""
 import base64
+import asyncio
 import plistlib
+import time
 from datetime import datetime, timezone
 
-from atc_protocol import (ProtocolError, file_complete, file_unavailable, metadata_finished,
+from atc_protocol import (ProtocolError, file_complete, file_progress, file_unavailable, metadata_finished,
                           negotiate, receive_event, send_frame, validate_batch_manifest)
 from atc_staging import SYNC_DIR, METADATA, SIGNATURE, _put_new, check_audio_paths, stage_audio
 from atc_signing import sign_metadata
@@ -75,27 +77,56 @@ async def send_batch(service, afc, *, identity, database_id, library_id, anchor,
     if message['Command'] != 'AssetManifest':
         raise ProtocolError('The phone did not request the planned songs; inspect before retrying.')
     foreign = validate_batch_manifest(message, own_parts, allowed_foreign)
-    # The phone may list requested assets in any order. The entire manifest
-    # was validated above; keep the user's intended transfer order instead.
-    for entry in entries:
-        asset_id = entry['plan']['track_id']
-        plan, source = entry['plan'], entry['source']
-        before = source.path.stat()
-        if before.st_size <= 0:
-            raise ProtocolError('The source file is empty.')
-        if on_asset is not None:
-            on_asset(asset_id, entry)
-        with source.path.open('rb') as stream:
-            await stage_audio(afc, asset_id=asset_id, extension=source.path.suffix.lower(),
-                              stream=stream, size=before.st_size, expected_sha=entry['sha'],
-                              permanent_path=plan['path'], cover=covers[asset_id])
-        after = source.path.stat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-            raise ProtocolError(f'The source changed during upload; inspect {source.path.name}.')
-        await send_frame(service, file_complete(asset_id, plan['path']))
-    for asset_id in foreign:
-        await send_frame(service, file_unavailable(asset_id))
-    terminal = await receive_event(service)
-    if terminal['Command'] != 'SyncFinished':
-        raise ProtocolError('The phone did not confirm the batch; inspect before retrying.')
-    return [entry['plan']['track_id'] for entry in entries]
+    # The phone can ping while audio is being staged over AFC. Keep a single
+    # ATC reader alive throughout the transfer so pings receive a prompt reply.
+    send_lock = asyncio.Lock()
+    reader = asyncio.create_task(receive_event(service, timeout=None, send_lock=send_lock))
+    try:
+        for position, entry in enumerate(entries):
+            asset_id = entry['plan']['track_id']
+            plan, source = entry['plan'], entry['source']
+            before = source.path.stat()
+            if before.st_size <= 0:
+                raise ProtocolError('The source file is empty.')
+            if on_asset is not None:
+                on_asset(asset_id, entry)
+            last_progress = 0.0
+            async def on_progress(written, size):
+                nonlocal last_progress
+                now = time.monotonic()
+                if last_progress and now - last_progress < 2 and written < size:
+                    return
+                async with send_lock:
+                    await send_frame(service, file_progress(written / size, (position + written / size) / len(entries)))
+                last_progress = now
+            with source.path.open('rb') as stream:
+                staged = asyncio.create_task(stage_audio(afc, asset_id=asset_id,
+                    extension=source.path.suffix.lower(), stream=stream, size=before.st_size,
+                    expected_sha=entry['sha'], permanent_path=plan['path'], cover=covers[asset_id],
+                    on_progress=on_progress))
+                try:
+                    done, _ = await asyncio.wait((staged, reader), return_when=asyncio.FIRST_COMPLETED)
+                    if reader in done:
+                        terminal = reader.result()
+                        raise ProtocolError('The phone ended the sync before the audio upload completed: ' + terminal['Command'])
+                    await staged
+                finally:
+                    if not staged.done():
+                        staged.cancel()
+                        await asyncio.gather(staged, return_exceptions=True)
+            after = source.path.stat()
+            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise ProtocolError(f'The source changed during upload; inspect {source.path.name}.')
+            async with send_lock:
+                await send_frame(service, file_complete(asset_id, plan['path']))
+        for asset_id in foreign:
+            async with send_lock:
+                await send_frame(service, file_unavailable(asset_id))
+        terminal = await asyncio.wait_for(reader, 30)
+        if terminal['Command'] != 'SyncFinished':
+            raise ProtocolError('The phone did not confirm the batch; inspect before retrying.')
+        return [entry['plan']['track_id'] for entry in entries]
+    finally:
+        if not reader.done():
+            reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
