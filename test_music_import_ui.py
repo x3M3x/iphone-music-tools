@@ -19,6 +19,8 @@ class ImportUITests(unittest.TestCase):
         with patch.object(ImportWindow,'load_sources'):
             window=ImportWindow(root)
         root.update_idletasks()
+        self.assertEqual((window.batch_size.get(),window.format_workers.get(),window.hash_workers.get(),
+                          window.metadata_workers.get(),window.readback_workers.get()),('100','16','16','16','8'))
         window.set_running(True)
         self.assertEqual(str(window.start_button['state']),'disabled')
         self.assertEqual(str(window.stop_button['state']),'normal')

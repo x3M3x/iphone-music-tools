@@ -80,7 +80,7 @@ def validate_confirmed_plan(context, songs, bindings):
 
 
 class ImportWindow:
-    def __init__(self, root, batch_size=10, format_workers=8, hash_workers=4, metadata_workers=4, readback_workers=4):
+    def __init__(self, root, batch_size=100, format_workers=16, hash_workers=16, metadata_workers=16, readback_workers=8):
         self.root = root
         root.title('iPhone Music Import')
         root.minsize(790, 710)
@@ -625,12 +625,12 @@ class ImportWindow:
 
 def main():
     parser=argparse.ArgumentParser(description='Import iPhone music in verified batches.')
-    parser.add_argument('--batch-size',type=batch_size_argument,default=10,
-                        help='maximum songs per sync batch (1–100; default 10)')
-    parser.add_argument('--format-workers',type=worker_argument,default=8,help='local format-check workers (1–16)')
-    parser.add_argument('--hash-workers',type=worker_argument,default=4,help='local file-hashing workers (1–16)')
-    parser.add_argument('--metadata-workers',type=worker_argument,default=4,help='metadata preparation workers (1–16)')
-    parser.add_argument('--readback-workers',type=lambda value:worker_argument(value,8),default=4,help='phone readback workers (1–8)')
+    parser.add_argument('--batch-size',type=batch_size_argument,default=100,
+                        help='maximum songs per sync batch (1–100; default 100)')
+    parser.add_argument('--format-workers',type=worker_argument,default=16,help='local format-check workers (1–16; default 16)')
+    parser.add_argument('--hash-workers',type=worker_argument,default=16,help='local file-hashing workers (1–16; default 16)')
+    parser.add_argument('--metadata-workers',type=worker_argument,default=16,help='metadata preparation workers (1–16; default 16)')
+    parser.add_argument('--readback-workers',type=lambda value:worker_argument(value,8),default=8,help='phone readback workers (1–8; default 8)')
     args=parser.parse_args()
     root=tk.Tk(); ImportWindow(root,args.batch_size,args.format_workers,args.hash_workers,args.metadata_workers,args.readback_workers); root.mainloop()
 
