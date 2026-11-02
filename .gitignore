@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.sqlite*
+*.db
+*.lock
+*.log
+import_reports/
+MusicExport*/
+*.mp3
+*.m4a
+*.wav
+*.aac
+*.m4p
+!tests-fixtures/*.mp3
+!tests-fixtures/*.m4a
+.iphone_music_export.json

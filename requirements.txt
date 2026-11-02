@@ -1,0 +1,5 @@
+pymobiledevice3>=11.49.1,<12
+mutagen>=1.47
+Pillow>=10
+cryptography>=42
+pywin32>=306; platform_system == 'Windows'

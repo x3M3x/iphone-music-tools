@@ -1,0 +1,81 @@
+import unittest
+import tempfile
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from direct_adapter import DirectAdapter
+from direct_phone import Catalog, Playlist, PhoneReadError
+
+
+class AdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_metadata_cache_reuses_entries_and_invalidates_changed_files(self):
+        adapter=DirectAdapter('new-phone',object(),object())
+        with tempfile.TemporaryDirectory() as tmp:
+            first=Path(tmp)/'one.mp3'; second=Path(tmp)/'two.mp3'
+            first.write_bytes(b'a'); second.write_bytes(b'b')
+            songs=[SimpleNamespace(path=path) for path in (first,second)]
+            with patch('direct_adapter.inspect', side_effect=lambda p: p.read_bytes()) as inspect_file:
+                self.assertEqual([adapter._inspect(s) for s in songs], [b'a',b'b'])
+                self.assertEqual([adapter._inspect(s) for s in songs], [b'a',b'b'])
+                self.assertEqual(inspect_file.call_count,2)
+                first.write_bytes(b'changed')
+                self.assertEqual(adapter._inspect(songs[0]), b'changed')
+                self.assertEqual(inspect_file.call_count,3)
+
+    async def test_empty_destination_is_rejected(self):
+        with self.assertRaisesRegex(PhoneReadError, 'destination'):
+            DirectAdapter('', object(), object())
+
+    async def test_unrecognized_existing_music_is_not_overwritten_or_duplicated(self):
+        adapter = DirectAdapter('new-phone', object(), object())
+        catalog = Catalog(1,2,7,(Playlist(5,'Arabic',(),100),),1,((3,10),))
+        with patch('direct_adapter.identity_from_afc', AsyncMock(return_value=(1,2))), \
+                patch.object(adapter, '_snapshot', AsyncMock(return_value=(catalog,None))):
+            with self.assertRaisesRegex(PhoneReadError, 'not verified'):
+                await adapter.validate_device('new-phone', ['5'], [])
+            await adapter.validate_device('new-phone', ['5'], ['3'])
+
+    async def test_selected_phone_must_match_adapter(self):
+        adapter = DirectAdapter('new-phone', object(), object())
+        with self.assertRaisesRegex(PhoneReadError, 'changed'):
+            await adapter.validate_device('different-phone', [], [])
+
+    async def test_existing_metadata_checks_overlap_and_use_one_phone_verification(self):
+        from music_importer import Song
+        from direct_audio import SourceAudio
+        adapter=DirectAdapter('new-phone',object(),object())
+        active=0
+        peak=0
+        gate=threading.Lock()
+        with tempfile.TemporaryDirectory() as tmp:
+            entries=[]
+            for index in range(4):
+                path=Path(tmp)/f'{index}.mp3';path.write_bytes(b'audio')
+                stat=path.stat()
+                song=Song(path,str(index),'','',stat.st_size,stat.st_mtime_ns,None,9)
+                entries.append((song,str(index+1),'sha',{'track_id':str(index+1),'sha':'sha',
+                                'path':'remote','artwork_id':None}))
+            def inspect_file(path):
+                nonlocal active,peak
+                with gate:
+                    active+=1;peak=max(peak,active)
+                time.sleep(.05)
+                with gate:
+                    active-=1
+                return SourceAudio(path,'mpeg1-layer3',44100,2,128,1.0,44100,
+                                   path.stem,'','',None,None,0,())
+            verify=AsyncMock(return_value={})
+            with patch('direct_adapter.file_date_ns',return_value=9), \
+                 patch('direct_adapter.inspect',side_effect=inspect_file), \
+                 patch('direct_adapter.verify_inserts',verify):
+                await adapter.verify_existing('new-phone',entries,lambda *args:None,threading.Event())
+            self.assertGreater(peak,1)
+            verify.assert_awaited_once()
+            self.assertEqual(len(verify.await_args.args[1]),4)
+
+
+if __name__ == '__main__':
+    unittest.main()
