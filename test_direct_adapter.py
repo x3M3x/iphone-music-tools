@@ -76,6 +76,49 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             verify.assert_awaited_once()
             self.assertEqual(len(verify.await_args.args[1]),4)
 
+    async def test_fast_mode_is_only_passed_to_existing_song_check(self):
+        from music_importer import Song
+        from direct_audio import SourceAudio
+        adapter=DirectAdapter('new-phone',object(),object(),fast_existing=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'a.mp3';path.write_bytes(b'audio');st=path.stat()
+            song=Song(path,'a','','',st.st_size,st.st_mtime_ns,None,9)
+            source=SourceAudio(path,'mpeg1-layer3',44100,2,128,1.0,44100,'a','','',None,None,0,())
+            entry=(song,'1','sha',{'track_id':'1','sha':'sha','path':'remote','artwork_id':None})
+            with patch('direct_adapter.file_date_ns',return_value=9), \
+                 patch('direct_adapter.inspect',return_value=source), \
+                 patch('direct_adapter.verify_inserts',new=AsyncMock(return_value={})) as verify:
+                await adapter.verify_existing('new-phone',[entry],lambda *a,**k:None,threading.Event())
+            self.assertTrue(verify.await_args.kwargs['fast_existing'])
+
+    async def test_fast_existing_mode_still_fully_verifies_new_upload(self):
+        from music_importer import Song
+        from direct_audio import SourceAudio
+        service=SimpleNamespace(close=AsyncMock())
+        client=SimpleNamespace(start_lockdown_service=AsyncMock(return_value=service))
+        adapter=DirectAdapter('new-phone',client,object(),fast_existing=True)
+        adapter.expected_identity=(1,2);adapter.before_batch_rows={}
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'a.mp3';path.write_bytes(b'audio');st=path.stat()
+            song=Song(path,'a','','',st.st_size,st.st_mtime_ns,None,9)
+            source=SourceAudio(path,'mpeg1-layer3',44100,2,128,1.0,44100,'a','','',None,None,0,())
+            plan={'track_id':'1','sha':'sha','path':'remote','artwork_id':None,
+                  'anchor':3,'database_id':1,'library_id':2}
+            adapter.current_batch=[plan]
+            entry={'song':song,'sha':'sha','plan':plan}
+            after=SimpleNamespace(anchor=4,song_dates=((1,10),))
+            with patch('direct_adapter.file_date_ns',return_value=9), \
+                 patch.object(adapter,'_inspect',return_value=source), \
+                 patch('direct_adapter.identity_from_afc',new=AsyncMock(return_value=(1,2))), \
+                 patch('direct_adapter.send_batch',new=AsyncMock(return_value=['1'])), \
+                 patch('direct_adapter.stable_capture',new=AsyncMock(return_value=(b'db',None))), \
+                 patch('direct_adapter.parse_catalog',return_value=after), \
+                 patch('direct_adapter.parse_inventory'), \
+                 patch('direct_adapter.preserved_rows',return_value={}), \
+                 patch('direct_adapter.verify_inserts',new=AsyncMock(return_value={})) as verify:
+                await adapter.upload_batch('new-phone',[entry])
+            self.assertFalse(verify.await_args.kwargs.get('fast_existing',False))
+
 
 if __name__ == '__main__':
     unittest.main()

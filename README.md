@@ -29,6 +29,8 @@ Direct import currently accepts MP3 and supported AAC-in-M4A files. It preserves
 
 The importer keeps `direct_import_history.sqlite` locally to recognize and verify its own prior uploads. Keep this journal when resuming. It refuses unverified existing music and stops if an operation has an uncertain result. After a disconnect or uncertain result, inspect the phone and journal before retrying; automatic recovery is not yet provided. **Stop after current batch** waits until the active batch finishes.
 
+The optional **Fast check for previously verified songs** checks the phone catalog, metadata, and file and artwork sizes without reading phone-file contents. It can miss audio or artwork changes that retain the same size. Local source files are still hashed, and newly uploaded songs still receive full byte-for-byte readback. The option is off by default.
+
 ## Performance and limitations
 
 The window lets you set **Format checks**, **File hashes**, and **Metadata** workers (1–16), **Phone reads** (1–8), and **Songs per batch** (1–100). Each defaults to its maximum. Progress shows the active stage, worker count, and an approximate files-per-second rate for checks. Larger worker counts can be slower on a busy disk or phone, so compare rates with the same library. Phone reads use bounded parallel readback; their performance and stability vary by device and have not yet been benchmarked on real phones.

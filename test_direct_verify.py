@@ -77,6 +77,31 @@ class Remote:
 
 
 class RemoteReadbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fast_existing_checks_metadata_and_sizes_without_reading_bytes(self):
+        from direct_verify import TrackReadback, _check_fast, _check_and_hash
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'song.mp3';path.write_bytes(b'audio')
+            source=SimpleNamespace(path=path,title='Title',artist='Artist',album='Album',
+                tags=(),cover=b'cover',cover_format='JPEG')
+            metadata={k:None for k in ('genre','albumartist','composer','copyright','comment',
+                     'track_number','track_count','disc_number','disc_count','year','compilation')}
+            track=TrackReadback('music/song',5,'Title','Artist','Album','art/cover',123,metadata)
+            afc=SimpleNamespace(stat=AsyncMock(side_effect=lambda p: {'st_ifmt':'S_IFREG',
+                'st_size':5,'st_mtime':1,'st_birthtime':1}))
+            with patch('direct_verify.file_date_ns',return_value=(123+978307200)*1_000_000_000), \
+                 patch('direct_verify.phone_cover',return_value=b'cover'), \
+                 patch('direct_verify._hash_remote',new=AsyncMock(return_value='wrong')) as readback:
+                self.assertTrue(await _check_fast(afc,track,source,'music/song','expected'))
+                readback.assert_not_awaited()
+                self.assertEqual(afc.stat.await_count,2)
+                with self.assertRaisesRegex(PhoneReadError,'bytes do not match'):
+                    await _check_and_hash(afc,track,source,'music/song','expected')
+                afc.stat.side_effect=lambda p: {'st_ifmt':'S_IFREG','st_size':4}
+                with self.assertRaisesRegex(PhoneReadError,'unexpected size'):
+                    await _check_fast(afc,track,source,'music/song','expected')
+                with self.assertRaisesRegex(PhoneReadError,'path or file size'):
+                    await _check_fast(afc,track,source,'music/other','expected')
+
     async def test_verification_overlaps_reads_and_keeps_progress_order(self):
         from direct_verify import verify_inserts
         active=0; peak=0; progress=[]

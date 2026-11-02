@@ -121,8 +121,8 @@ async def _hash_remote(afc, path, expected_size):
     return digest.hexdigest()
 
 
-async def verify_inserts(afc, items, progress=None, stop=None, workers=4):
-    """Verify many tracks against one database snapshot and exact file bytes."""
+async def verify_inserts(afc, items, progress=None, stop=None, workers=4, fast_existing=False):
+    """Verify tracks against one snapshot; fast checks omit remote byte hashes."""
     if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 8:
         raise PhoneReadError('Choose 1 to 8 phone readback workers.')
     db, wal = await stable_capture(afc)
@@ -134,7 +134,8 @@ async def verify_inserts(afc, items, progress=None, stop=None, workers=4):
         group = list(zip(items[start:start+workers], tracks[start:start+workers]))
         # Independent handles share AFC's packet demultiplexer; all reads
         # finish or are cancelled before leaving this group.
-        pending = [asyncio.create_task(_check_and_hash(afc, track, source, path, sha))
+        check = _check_fast if fast_existing else _check_and_hash
+        pending = [asyncio.create_task(check(afc, track, source, path, sha))
                    for (wire_id, source, path, sha, artwork_id), track in group]
         try:
             await asyncio.gather(*pending)
@@ -188,7 +189,7 @@ def verify_preserved(before, after):
             raise PhoneReadError(f'Existing phone {table} changed during import; inspect before continuing.')
 
 
-async def _check_and_hash(afc, track, source, expected_path, expected_sha):
+def _check_metadata(track, source, expected_path):
     if track.path != expected_path or track.size != source.path.stat().st_size:
         raise PhoneReadError('The uploaded track path or file size does not match.')
     if track.date_added != file_date_ns(source.path)//1_000_000_000 - 978307200:
@@ -217,12 +218,29 @@ async def _check_and_hash(afc, track, source, expected_path, expected_sha):
     comp=tags.get('compilation',())
     if len(comp)==1 and comp[0]=='1' and not track.metadata['compilation']:
         raise PhoneReadError('The uploaded compilation flag does not match the source.')
+    if source.cover and not track.artwork_path:
+        raise PhoneReadError('The original embedded cover could not be verified.')
+
+
+async def _check_fast(afc, track, source, expected_path, expected_sha):
+    """Check the catalog and remote sizes, without claiming byte equality."""
+    _check_metadata(track, source, expected_path)
+    files = [(track.path, track.size)]
+    if source.cover:
+        files.append((track.artwork_path, len(phone_cover(source))))
+    for path, size in files:
+        info = await afc.stat('/' + path.lstrip('/'))
+        if info.get('st_ifmt') != 'S_IFREG' or info.get('st_size') != size:
+            raise PhoneReadError('The existing phone file has an unexpected size or type.')
+    return True
+
+
+async def _check_and_hash(afc, track, source, expected_path, expected_sha):
+    _check_metadata(track, source, expected_path)
     if await _hash_remote(afc, track.path, track.size) != expected_sha:
         raise PhoneReadError('The uploaded song bytes do not match the source.')
     if source.cover:
         cover = phone_cover(source)
-        if not track.artwork_path:
-            raise PhoneReadError('The original embedded cover could not be verified.')
         if await _hash_remote(afc, track.artwork_path, len(cover)) != hashlib.sha256(cover).hexdigest():
             raise PhoneReadError('The uploaded artwork does not match the source.')
     return True

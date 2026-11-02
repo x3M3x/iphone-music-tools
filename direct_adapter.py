@@ -25,7 +25,7 @@ ARTWORK_DB = '/iTunes_Control/Artwork/ArtworkDB'
 
 
 class DirectAdapter:
-    def __init__(self, serial, client, afc, metadata_workers=4, readback_workers=4):
+    def __init__(self, serial, client, afc, metadata_workers=4, readback_workers=4, fast_existing=False):
         if not serial:
             raise PhoneReadError('Choose the destination phone.')
         self.serial, self.client, self.afc = serial, client, afc
@@ -34,6 +34,7 @@ class DirectAdapter:
         if isinstance(readback_workers, bool) or not isinstance(readback_workers, int) or not 1 <= readback_workers <= 8:
             raise PhoneReadError('Choose 1 to 8 phone readback workers.')
         self.metadata_workers, self.readback_workers = metadata_workers, readback_workers
+        self.fast_existing = fast_existing
         self.expected_identity = None
         self.current_batch = None
         self.verified_ids = set()
@@ -232,7 +233,8 @@ class DirectAdapter:
                 items.extend(await asyncio.gather(*(loop.run_in_executor(pool,prepare,entry)
                                                     for entry in entries[start:start+self.metadata_workers])))
                 progress(len(items),len(entries),entries[len(items)-1][0].path.name,phase='checking_metadata')
-            await verify_inserts(self.afc,items,progress=progress,stop=stop,workers=self.readback_workers)
+            await verify_inserts(self.afc,items,progress=progress,stop=stop,workers=self.readback_workers,
+                                 fast_existing=self.fast_existing)
             self.verified_ids.update(str(item[0]) for item in items)
         finally:
             await asyncio.to_thread(pool.shutdown,wait=True,cancel_futures=True)

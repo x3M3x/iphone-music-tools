@@ -111,6 +111,7 @@ class ImportWindow:
         self.hash_workers = tk.StringVar(value=str(hash_workers))
         self.metadata_workers = tk.StringVar(value=str(metadata_workers))
         self.readback_workers = tk.StringVar(value=str(readback_workers))
+        self.fast_existing = tk.BooleanVar(value=False)
         self.phase_started = None
         self.phase_key = None
         self.map_note = tk.StringVar(value='Playlist folders will match automatically by name.')
@@ -173,7 +174,9 @@ class ImportWindow:
             ttk.Label(performance,text=label).pack(side='left',padx=(0,3))
             control=ttk.Spinbox(performance,from_=1,to=maximum,textvariable=variable,width=3)
             control.pack(side='left',padx=(0,12)); self.worker_controls.append(control)
-        ttk.Label(options,text='Workers per stage; uploads are sent in order.',foreground='#555555').grid(row=4,column=0,columnspan=4,sticky='w')
+        self.fast_check=ttk.Checkbutton(options,text='Fast check for previously verified songs (no byte readback)',variable=self.fast_existing)
+        self.fast_check.grid(row=4,column=0,columnspan=4,sticky='w',pady=(4,0))
+        ttk.Label(options,text='Workers per stage; uploads are sent in order.',foreground='#555555').grid(row=5,column=0,columnspan=4,sticky='w')
         ttk.Label(pane, textvariable=self.note, wraplength=750).grid(row=6, column=0, columnspan=4, sticky='w', pady=(6,5))
 
         table_frame = ttk.Frame(pane)
@@ -322,7 +325,7 @@ class ImportWindow:
 
     def set_running(self, running):
         self.importing=running
-        for control in (self.browse_button,self.check_button,self.batch_size_control,*self.worker_controls):
+        for control in (self.browse_button,self.check_button,self.batch_size_control,self.fast_check,*self.worker_controls):
             control.config(state='disabled' if running else 'normal')
         self.source_entry.config(state='disabled' if running else 'readonly')
         for control in (self.source_combo,self.order_combo,self.device_combo,self.dest_combo):
@@ -363,7 +366,8 @@ class ImportWindow:
         context={'device':device,'dest':dest,'name':name,'target_id':target_id,'batch':batch,
                  'source':source,'root':source_root,'batch_size':requested_batch,
                  'format_workers':format_workers,'hash_workers':hash_workers,
-                 'metadata_workers':metadata_workers,'readback_workers':readback_workers}
+                 'metadata_workers':metadata_workers,'readback_workers':readback_workers,
+                 'fast_existing':self.fast_existing.get()}
         self.stop_event.clear();self.set_running(True)
         self.phase_key=None;self.phase_started=None
         self.bar.config(maximum=1,value=0)
@@ -428,6 +432,10 @@ class ImportWindow:
                  f'Songs are copied in batches of up to {context["batch_size"]}, oldest first, with their saved dates. '
                  'Equal dates use source-path order. The phone controls All Music sorting. '
                  'The importer stops if it finds music it cannot verify.')
+        if context.get('fast_existing',False):
+            details += ('\n\nFast check: previously verified phone files are checked by metadata and size, '
+                        'not by reading their bytes. Changes that keep the same size may go undetected. '
+                        'New uploads receive full byte verification.')
         if bindings:
             mapping_lines=[]
             for binding in bindings:
@@ -458,6 +466,8 @@ class ImportWindow:
         def worker():
             try:
                 with report.open('w',encoding='utf-8') as log:
+                    log.write(json.dumps({'existing_phone_check': 'metadata_and_size' if context['fast_existing'] else 'full_readback',
+                                          'new_upload_check': 'full_readback'})+'\n')
                     def progress(phase,index,total,filename):
                         record={'phase':phase,'index':index,'total':total,'file':filename}
                         log.write(json.dumps(record,ensure_ascii=False)+'\n');log.flush()
@@ -469,7 +479,8 @@ class ImportWindow:
                                 return {'stopped':True,'uploaded_or_verified':0}
                             async with locked_phone(device['id']) as (client,afc):
                                 adapter=DirectAdapter(device['id'],client,afc,
-                                    metadata_workers=context['metadata_workers'],readback_workers=context['readback_workers'])
+                                    metadata_workers=context['metadata_workers'],readback_workers=context['readback_workers'],
+                                    fast_existing=context['fast_existing'])
                                 return await ordered_transfer.run(adapter,device['id'],songs,playlists,
                                                                   JOURNAL,progress,self.stop_event,
                                                                   batch_size=context['batch_size'],automatic_playlists=automatic,
@@ -563,7 +574,7 @@ class ImportWindow:
                 self.bar.config(maximum=max(total,1),value=done if phase in ('checking_local','checking_metadata','checking_phone','preparing_batch','verified','playlist') else max(done-1,0))
                 labels={'checking_local':f'Hashing local files ({self.hash_workers.get()} workers)',
                         'checking_metadata':f'Preparing metadata ({self.metadata_workers.get()} workers)',
-                        'checking_phone':f'Verifying phone files ({self.readback_workers.get()} workers)',
+                        'checking_phone':f'{"Fast checking" if self.fast_existing.get() else "Verifying"} phone files ({self.readback_workers.get()} workers)',
                         'preparing_batch':f'Preparing batches ({self.metadata_workers.get()} metadata workers)',
                         'uploading':'Uploading','verified':'Verified','playlist':'Linking playlist'}
                 label=labels.get(phase,phase.capitalize())
