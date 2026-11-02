@@ -12,6 +12,9 @@ from collections import Counter
 from direct_phone import PhoneReadError, stable_capture
 from direct_audio import phone_cover
 from music_importer import file_date_ns
+from pymobiledevice3.exceptions import ConnectionTerminatedError
+
+CONNECTION_ERRORS = (ConnectionTerminatedError, ConnectionError, EOFError, asyncio.IncompleteReadError)
 
 
 @dataclass(frozen=True)
@@ -121,17 +124,26 @@ async def _hash_remote(afc, path, expected_size):
     return digest.hexdigest()
 
 
-async def verify_inserts(afc, items, progress=None, stop=None, workers=4, fast_existing=False):
+async def verify_inserts(afc, items, progress=None, stop=None, workers=4, fast_existing=False, reconnect=None):
     """Verify tracks against one snapshot; fast checks omit remote byte hashes."""
     if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 8:
         raise PhoneReadError('Choose 1 to 8 phone readback workers.')
-    db, wal = await stable_capture(afc)
+    for attempt in (0, 1):
+        try:
+            db, wal = await stable_capture(afc)
+            break
+        except CONNECTION_ERRORS:
+            if reconnect is None or attempt:
+                raise
+            afc = await reconnect()
     tracks = parse_tracks(db, wal, [(item[0],item[4]) for item in items])
     results = {}
-    for start in range(0, len(items), workers):
+    pos = 0
+    reconnects = 0
+    while pos < len(items):
         if stop is not None and stop.is_set():
             raise PhoneReadError('Stopped while checking songs already on the phone.')
-        group = list(zip(items[start:start+workers], tracks[start:start+workers]))
+        group = list(zip(items[pos:pos+workers], tracks[pos:pos+workers]))
         # Independent handles share AFC's packet demultiplexer; all reads
         # finish or are cancelled before leaving this group.
         check = _check_fast if fast_existing else _check_and_hash
@@ -139,15 +151,22 @@ async def verify_inserts(afc, items, progress=None, stop=None, workers=4, fast_e
                    for (wire_id, source, path, sha, artwork_id), track in group]
         try:
             await asyncio.gather(*pending)
-        except BaseException:
+        except BaseException as error:
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
+            if isinstance(error, CONNECTION_ERRORS) and reconnect is not None and reconnects < 3:
+                reconnects += 1
+                afc = await reconnect()
+                db, wal = await stable_capture(afc)
+                tracks = parse_tracks(db, wal, [(item[0],item[4]) for item in items])
+                continue
             raise
         for offset, ((wire_id, source, *_), _) in enumerate(group, 1):
             results[str(wire_id)] = True
             if progress is not None:
-                progress(start+offset,len(items),source.path.name)
+                progress(pos+offset,len(items),source.path.name)
+        pos += workers
     return results
 
 

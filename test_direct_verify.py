@@ -138,6 +138,45 @@ class RemoteReadbackTests(unittest.IsolatedAsyncioTestCase):
                 await verify_inserts(object(),items)
         self.assertTrue(stopped.is_set())
 
+    async def test_connection_drop_reconnects_and_retries_the_group(self):
+        from direct_verify import verify_inserts
+        from pymobiledevice3.exceptions import ConnectionTerminatedError
+        calls=[0]
+        async def read(afc,_track,source,_path,_sha):
+            calls[0]+=1
+            if source.path.name == '3' and calls[0] < 4:
+                raise ConnectionTerminatedError('Connection was terminated abruptly.')
+        connections=[object(),object()]
+        reconnects=[0]
+        async def reconnect():
+            reconnects[0]+=1
+            return connections[1]
+        items=[(i,SimpleNamespace(path=Path(str(i))),'path','hash',None) for i in range(1,5)]
+        captures=[0]
+        async def capture(afc):
+            captures[0]+=1
+            return (b'db',None)
+        with patch('direct_verify.stable_capture',side_effect=capture), \
+             patch('direct_verify.parse_tracks',return_value=[object()]*4), \
+             patch('direct_verify._check_and_hash',side_effect=read):
+            result=await verify_inserts(connections[0],items,reconnect=reconnect,workers=2)
+        self.assertEqual(len(result),4)
+        self.assertEqual(reconnects,[1])
+        self.assertEqual(captures,[2])
+
+    async def test_repeated_connection_drops_still_fail_closed(self):
+        from direct_verify import verify_inserts
+        from pymobiledevice3.exceptions import ConnectionTerminatedError
+        async def read(afc,_track,_source,_path,_sha):
+            raise ConnectionTerminatedError('Connection was terminated abruptly.')
+        async def reconnect(): return object()
+        items=[(1,SimpleNamespace(path=Path('a')),'path','hash',None)]
+        with patch('direct_verify.stable_capture',new=AsyncMock(return_value=(b'db',None))), \
+             patch('direct_verify.parse_tracks',return_value=[object()]), \
+             patch('direct_verify._check_and_hash',side_effect=read):
+            with self.assertRaisesRegex(ConnectionTerminatedError,'terminated'):
+                await verify_inserts(object(),items,reconnect=reconnect)
+
     async def test_hashes_file_contents_and_checks_size(self):
         self.assertEqual(await _hash_remote(Remote(b'track'), 'music/file', 5), hashlib.sha256(b'track').hexdigest())
         with self.assertRaisesRegex(PhoneReadError, 'unexpected size'):

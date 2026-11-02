@@ -481,10 +481,13 @@ class ImportWindow:
                                 adapter=DirectAdapter(device['id'],client,afc,
                                     metadata_workers=context['metadata_workers'],readback_workers=context['readback_workers'],
                                     fast_existing=context['fast_existing'])
-                                return await ordered_transfer.run(adapter,device['id'],songs,playlists,
-                                                                  JOURNAL,progress,self.stop_event,
-                                                                  batch_size=context['batch_size'],automatic_playlists=automatic,
-                                                                  hash_workers=context['hash_workers'])
+                                try:
+                                    return await ordered_transfer.run(adapter,device['id'],songs,playlists,
+                                                                      JOURNAL,progress,self.stop_event,
+                                                                      batch_size=context['batch_size'],automatic_playlists=automatic,
+                                                                      hash_workers=context['hash_workers'])
+                                finally:
+                                    await adapter.close()
                         result=asyncio.run(transfer())
                         log.write(json.dumps({'result':result,'stopped':self.stop_event.is_set()},ensure_ascii=False)+'\n')
                         self.messages.put(('direct_done',result))

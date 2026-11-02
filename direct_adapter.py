@@ -4,6 +4,8 @@ import asyncio
 import secrets
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pymobiledevice3.exceptions import ConnectionTerminatedError
+from pymobiledevice3.services.afc import AfcService
 
 from artwork_inventory import parse as parse_artwork, reserve as reserve_artwork
 from atc_send_playlist import update_playlist
@@ -20,6 +22,8 @@ from direct_verify import verify_inserts, preserved_rows, verify_preserved
 from playlist_operation_preview import _signed_pid
 from track_operation_preview import insert_preview
 from music_importer import file_date_ns
+
+CONNECTION_ERRORS = (ConnectionTerminatedError, ConnectionError, EOFError, asyncio.IncompleteReadError)
 
 ARTWORK_DB = '/iTunes_Control/Artwork/ArtworkDB'
 
@@ -40,35 +44,69 @@ class DirectAdapter:
         self.verified_ids = set()
         self._inspect_cache = {}
         self.before_batch_rows = None
+        self._work_afc = None
+
+    async def work_afc(self):
+        """A data connection separate from the one holding the sync lock."""
+        if self._work_afc is None:
+            connection = AfcService(self.client)
+            await connection.connect()
+            self._work_afc = connection
+        return self._work_afc
+
+    async def refresh_work_afc(self):
+        old, self._work_afc = self._work_afc, None
+        if old is not None:
+            try:
+                await old.close()
+            except Exception:
+                pass
+        return await self.work_afc()
+
+    async def close(self):
+        if self._work_afc is not None:
+            try:
+                await self._work_afc.close()
+            except Exception:
+                pass
+            self._work_afc = None
 
     def _device(self, serial):
         if serial != self.serial:
             raise PhoneReadError('The selected destination changed; stop the import.')
 
     async def _snapshot(self):
-        data, wal = await stable_capture(self.afc)
+        for attempt in (0, 1):
+            try:
+                data, wal = await stable_capture(await self.work_afc())
+                break
+            except CONNECTION_ERRORS:
+                if attempt:
+                    raise
+                await self.refresh_work_afc()
         return parse_catalog(data, wal), parse_inventory(data, wal)
 
     async def _artwork(self):
-        info = await _stat_optional(self.afc, ARTWORK_DB)
+        afc = await self.work_afc()
+        info = await _stat_optional(afc, ARTWORK_DB)
         if info is None:
             raise PhoneReadError('The saved artwork allocation database is missing.')
         attrs = dict(info)
         size = attrs['st_size']
         if attrs['st_ifmt'] != 'S_IFREG' or not 132 <= size <= 32*1024*1024:
             raise PhoneReadError('Unsupported saved artwork database.')
-        handle = await self.afc.fopen(ARTWORK_DB)
+        handle = await afc.fopen(ARTWORK_DB)
         try:
-            data = await self.afc.fread(handle, size + 1)
+            data = await afc.fread(handle, size + 1)
         finally:
-            await self.afc.fclose(handle)
-        if len(data) != size or await _stat_optional(self.afc, ARTWORK_DB) != info:
+            await afc.fclose(handle)
+        if len(data) != size or await _stat_optional(afc, ARTWORK_DB) != info:
             raise PhoneReadError('Artwork database changed during preparation; retry.')
         return parse_artwork(data)
 
     async def validate_device(self, serial, destinations, verified_tracks):
         self._device(serial)
-        self.expected_identity = await identity_from_afc(self.afc)
+        self.expected_identity = await identity_from_afc(await self.work_afc())
         catalog, _ = await self._snapshot()
         existing = [str(track_id) for track_id, _ in catalog.song_dates]
         if sorted(existing) != sorted(verified_tracks):
@@ -86,9 +124,9 @@ class DirectAdapter:
         for song, _ in songs_with_shas:
             if file_date_ns(song.path) != song.file_date_ns:
                 raise PhoneReadError('A source file date changed after planning; refresh and retry.')
-        if await identity_from_afc(self.afc) != self.expected_identity:
+        if await identity_from_afc(await self.work_afc()) != self.expected_identity:
             raise PhoneReadError('The phone music library identity changed.')
-        data,wal=await stable_capture(self.afc)
+        data,wal=await stable_capture(await self.work_afc())
         catalog,inventory=parse_catalog(data,wal),parse_inventory(data,wal)
         if sorted(str(track_id) for track_id,_ in catalog.song_dates) != sorted(self.verified_ids):
             raise PhoneReadError('The phone music library changed before preparing a batch.')
@@ -122,7 +160,7 @@ class DirectAdapter:
                 if path.casefold() in chosen:
                     continue
                 try:
-                    await check_audio_paths(self.afc, asset_id=str(signed_track), extension=extension,
+                    await check_audio_paths(await self.work_afc(), asset_id=str(signed_track), extension=extension,
                                             permanent_path=path, has_cover=bool(source.cover))
                 except StagingError:
                     continue
@@ -155,6 +193,7 @@ class DirectAdapter:
 
     async def upload_batch(self, serial, entries, on_asset=None):
         self._device(serial)
+        afc = await self.refresh_work_afc()  # each batch starts on a young connection
         plans = [entry['plan'] for entry in entries]
         if plans != self.current_batch:
             raise PhoneReadError('The upload plan changed; stop before sending.')
@@ -163,7 +202,7 @@ class DirectAdapter:
         for entry in entries:
             if file_date_ns(entry['song'].path) != entry['song'].file_date_ns:
                 raise PhoneReadError('A source file date changed before upload.')
-        if await identity_from_afc(self.afc) != self.expected_identity:
+        if await identity_from_afc(afc) != self.expected_identity:
             raise PhoneReadError('The phone music library identity changed.')
         anchor = plans[0]['anchor']
         if any(plan['anchor'] != anchor for plan in plans):
@@ -174,14 +213,14 @@ class DirectAdapter:
                           entry['plan'].get('spelling_overrides', {}))) for entry in entries]
         service = await self.client.start_lockdown_service('com.apple.atc')
         try:
-            track_ids = await send_batch(service, self.afc, identity=self.expected_identity,
+            track_ids = await send_batch(service, afc, identity=self.expected_identity,
                 database_id=plans[0]['database_id'], library_id=plans[0]['library_id'], anchor=anchor,
                 entries=entries,
                 allowed_foreign={(track_id, part) for track_id in self.verified_ids for part in (2,4)},
                 on_asset=on_asset)
         finally:
             await service.close()
-        after_data,after_wal=await stable_capture(self.afc)
+        after_data,after_wal=await stable_capture(await self.work_afc())
         after_catalog=parse_catalog(after_data,after_wal)
         parse_inventory(after_data,after_wal)  # catches duplicate IDs before the next batch
         expected=set(self.verified_ids) | set(track_ids)
@@ -194,7 +233,8 @@ class DirectAdapter:
             plan, song, sha = entry['plan'], entry['song'], entry['sha']
             source = apply_spelling(self._inspect(song), plan.get('spelling_overrides', {}))
             items.append((int(track_id), source, plan['path'], sha, plan['artwork_id']))
-        await verify_inserts(self.afc, items, workers=self.readback_workers)
+        await verify_inserts(await self.work_afc(), items, workers=self.readback_workers,
+                              reconnect=self.refresh_work_afc)
         self.verified_ids.update(str(track_id) for track_id in track_ids)
         return list(track_ids)
 
@@ -205,7 +245,7 @@ class DirectAdapter:
         if plan['track_id'] != str(track_id) or plan['sha'] != sha:
             raise PhoneReadError('A previous song has an inconsistent journal entry.')
         source = apply_spelling(self._inspect(song), plan.get('spelling_overrides',{}))
-        verified = await verify_insert(self.afc, int(track_id), source, plan['path'],
+        verified = await verify_insert(await self.work_afc(), int(track_id), source, plan['path'],
                                        sha, plan['artwork_id'])
         if verified:
             self.verified_ids.add(str(track_id))
@@ -233,8 +273,9 @@ class DirectAdapter:
                 items.extend(await asyncio.gather(*(loop.run_in_executor(pool,prepare,entry)
                                                     for entry in entries[start:start+self.metadata_workers])))
                 progress(len(items),len(entries),entries[len(items)-1][0].path.name,phase='checking_metadata')
-            await verify_inserts(self.afc,items,progress=progress,stop=stop,workers=self.readback_workers,
-                                 fast_existing=self.fast_existing)
+            await verify_inserts(await self.work_afc(),items,progress=progress,stop=stop,
+                                 workers=self.readback_workers,fast_existing=self.fast_existing,
+                                 reconnect=self.refresh_work_afc)
             self.verified_ids.update(str(item[0]) for item in items)
         finally:
             await asyncio.to_thread(pool.shutdown,wait=True,cancel_futures=True)
@@ -273,7 +314,7 @@ class DirectAdapter:
             raise PhoneReadError('The reserved playlist identity is already in use.')
         service=await self.client.start_lockdown_service('com.apple.atc')
         try:
-            await create_playlist(service,self.afc,identity=self.expected_identity,catalog=catalog,
+            await create_playlist(service,await self.work_afc(),identity=self.expected_identity,catalog=catalog,
                 playlist_id=new & (2**64-1),name=name,track_ids=[int(i) for i in desired],
                 allowed_foreign={(track_id,part) for track_id in self.verified_ids for part in (2,4)})
         finally:
@@ -284,7 +325,7 @@ class DirectAdapter:
         catalog, _ = await self._snapshot()
         service = await self.client.start_lockdown_service('com.apple.atc')
         try:
-            await update_playlist(service, self.afc, identity=self.expected_identity, catalog=catalog,
+            await update_playlist(service, await self.work_afc(), identity=self.expected_identity, catalog=catalog,
                                   playlist_id=int(destination), desired_ids=desired,
                                   allowed_foreign={(track_id, part) for track_id in self.verified_ids for part in (2,4)})
         finally:
