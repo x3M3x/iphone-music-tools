@@ -25,6 +25,8 @@ If you have manually added files to one playlist in an older export, choose that
 
 Choose the export folder and the destination iPhone. With **All music** and **Import all music, then link playlists** selected, the importer sends songs in batches, matches playlist folders to phone playlists by name, and creates missing playlists. The importer uses the files' saved dates to order the import, oldest first, and links playlists newest first. Identical dates use paths to break ties, so their original relative order cannot be reconstructed from dates alone. Playlist order and Music app display can vary by device and iOS.
 
+Clicking **Import to iPhone** starts the import immediately after its checks; there is no separate confirmation dialog.
+
 Direct import currently accepts MP3 and supported AAC-in-M4A files. It preserves original audio bytes and validates supported metadata, saved dates, and available embedded artwork. PNG artwork is converted to JPEG for the phone display cache; the embedded source artwork is unchanged. Files with unsupported or ambiguous metadata are reported rather than silently changed.
 
 The importer keeps `direct_import_history.sqlite` locally to recognize and verify its own prior uploads. Keep this journal when resuming. It refuses unverified existing music and stops if an operation has an uncertain result. After a disconnect or uncertain result, inspect the phone and journal before retrying; automatic recovery is not yet provided. **Stop after current batch** waits until the active batch finishes.

@@ -45,7 +45,7 @@ class ImportUITests(unittest.TestCase):
         window.set_running(True)
         self.assertEqual(str(window.start_button['state']),'disabled')
 
-    def test_confirmation_includes_mapping_and_does_not_start_when_cancelled(self):
+    def test_confirmed_plan_starts_the_transfer_without_a_dialog(self):
         from types import SimpleNamespace
         root=tk.Tk();root.withdraw();self.addCleanup(root.destroy)
         with patch.object(ImportWindow,'load_sources'):
@@ -57,13 +57,11 @@ class ImportUITests(unittest.TestCase):
                  'automatic_preview':[('Arabic','123')]}
         binding=SimpleNamespace(name='Arabic',songs=[song])
         window.set_running(True)
-        with patch('music_import_ui.messagebox.askyesno',return_value=False) as confirm, \
+        with patch('music_import_ui.messagebox.askyesno') as confirm, \
              patch.object(window,'begin_transfer') as transfer:
             window.confirm_preflight((context,[song],[],'', [binding]))
-        self.assertIn('Arabic (1 songs)',confirm.call_args.args[1])
-        self.assertIn('New iPhone',confirm.call_args.args[1])
-        transfer.assert_not_called()
-        self.assertFalse(window.importing)
+        confirm.assert_not_called()
+        transfer.assert_called_once()
 
     def test_batch_flag_accepts_safe_bounds(self):
         import argparse

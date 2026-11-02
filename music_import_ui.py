@@ -428,28 +428,7 @@ class ImportWindow:
             self.set_running(False);messagebox.showerror('No songs','No supported music files were found.')
             return
         target=context['name'] if context['name'] else context['dest']['name']
-        details=(f'Add up to {len(songs):,} songs to {target} on {context["device"]["name"]}?\n\n'
-                 f'Songs are copied in batches of up to {context["batch_size"]}, oldest first, with their saved dates. '
-                 'Equal dates use source-path order. The phone controls All Music sorting. '
-                 'The importer stops if it finds music it cannot verify.')
-        if context.get('fast_existing',False):
-            details += ('\n\nFast check: previously verified phone files are checked by metadata and size, '
-                        'not by reading their bytes. Changes that keep the same size may go undetected. '
-                        'New uploads receive full byte verification.')
-        if bindings:
-            mapping_lines=[]
-            for binding in bindings:
-                if context['batch']:
-                    expected=dict(context['automatic_preview'])[binding.name]
-                    label='existing playlist' if expected is not None else 'new playlist'
-                    mapping_lines.append(f'{binding.name} ({len(binding.songs)} songs) → {label}')
-                else:
-                    mapping_lines.append(f'{binding.name} ({len(binding.songs)} songs) → {context["dest"]["name"]}')
-            details+='\n\nPlaylist destinations:\n'+ ('\n'.join(mapping_lines) if mapping_lines else 'None selected')
-        if unsupported:
-            details+=f'\n\n{len(unsupported)} unsupported file entries will not be imported.'
-        if not messagebox.askyesno('Confirm import',details):
-            self.set_running(False);self.status.set('Import was not started.');return
+        self.status.set(f'Importing up to {len(songs):,} songs to {target}…')
         self.begin_transfer(context,songs,bindings)
 
     def begin_transfer(self, context, preview_songs, bindings):
